@@ -1,0 +1,6 @@
+/.DS_Store
+/.env
+/__pycache__
+/complete_backup_20250901_231033.sql
+/myenv
+/schema_backup_20250901_231033.sql
