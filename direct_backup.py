@@ -5,113 +5,112 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def get_db_password():
-    """Get the actual database password"""
-    print("You need your Supabase database password (not the API key).")
-    print("Find it in: Supabase Dashboard > Project Settings > Database > Connection string")
-    print("Or reset it in: Database > Settings > Database password")
-    
-    password = input("Enter your database password: ").strip()
-    return password
+# --- Configuration ---
+# Schemas managed by Supabase that should NOT be included in a complete backup.
+EXCLUDED_SCHEMAS = [
+    'auth',
+    'storage',
+    'realtime',
+    'supabase_functions',
+    'supabase_migrations',
+]
+# --- End Configuration ---
 
-def backup_supabase_schema():
-    """Direct schema backup using pg_dump"""
+def get_config():
+    """Load configuration from .env and validate."""
+    host = os.getenv('DB_HOST')
+    port = os.getenv('DB_PORT', '6543')
+    user = os.getenv('DB_USER')
+    password = os.getenv('PASS')
     
-    supabase_url = os.getenv('SUPABASE_URL')
-    if not supabase_url:
-        print("❌ SUPABASE_URL not found in .env")
-        return
+    if not host or not user:
+        print("❌ Configuration Error: Missing DB_HOST or DB_USER in .env file.")
+        return None, None
+        
+    if not password:
+        password = input("Enter your database password: ").strip()
+        if not password:
+            print("❌ Password cannot be empty.")
+            return None, None
+            
+    return {
+        'host': host,
+        'port': port,
+        'user': user,
+        'password': password
+    }, password
+
+def run_pg_dump(config, output_file, mode):
+    """Utility function to execute pg_dump."""
     
-    # Extract host from URL and add db prefix
-    host = supabase_url.replace('https://', '').replace('http://', '')
-    host = 'db.' + host  # Add db. prefix for direct connection
-    
-    # Get database password
-    password = get_db_password()
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Schema-only backup (no data)
-    schema_file = f"schema_backup_{timestamp}.sql"
-    
-    print(f"🚀 Creating schema backup: {schema_file}")
-    
-    # pg_dump command for schema only (using PostgreSQL 15)
+    # 1. Define pg_dump path
+    # Try to use the full path you had before, but fallback to 'pg_dump' if not found
+    pg_dump_path = '/opt/homebrew/opt/postgresql@15/bin/pg_dump'
+    if not os.path.exists(pg_dump_path):
+        pg_dump_path = 'pg_dump'
+        
+    # 2. Base command structure
     cmd = [
-        '/opt/homebrew/opt/postgresql@15/bin/pg_dump',
-        f'--host={host}',
-        '--port=5432',
-        '--username=postgres',
+        pg_dump_path,
+        f'--host={config["host"]}',
+        f'--port={config["port"]}',
+        f'--username={config["user"]}',
         '--dbname=postgres',
-        '--schema-only',  # Only structure, no data
-        '--no-owner',     # Don't include ownership commands
-        '--no-privileges', # Don't include privilege commands
-        '--clean',        # Include DROP commands
-        '--if-exists',    # Use IF EXISTS with DROP commands
-        '--no-sync',      # Ignore version mismatch
-        '--file=' + schema_file
+        '--clean',         # Add DROP TABLE IF EXISTS statements
+        '--if-exists',     # Only use IF EXISTS with DROP
+        '--no-owner',      # Prevents ownership errors on restore
+        '--no-privileges', # Prevents grant errors on restore
+        f'--file={output_file}'
     ]
     
-    # Set password via environment variable
-    env = os.environ.copy()
-    env['PGPASSWORD'] = password
+    # 3. Mode-specific flags
+    if mode == 'SCHEMA_ONLY':
+        cmd.append('--schema-only')
+        print(f"\n🚀 Creating SCHEMA-ONLY backup: {output_file}")
     
+    elif mode == 'FULL_BACKUP':
+        # Exclude managed schemas for a clean, restorable full backup
+        for schema in EXCLUDED_SCHEMAS:
+            cmd.append(f'--exclude-schema={schema}')
+        print(f"\n🚀 Creating FULL BACKUP (Schema + Data, excluding system tables): {output_file}")
+
+    # 4. Set PGPASSWORD environment variable
+    env = os.environ.copy()
+    env['PGPASSWORD'] = config['password']
+    
+    # 5. Execute
     try:
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
         
         if result.returncode == 0:
-            print(f"✅ Schema backup completed: {schema_file}")
-            
-            # Check file size
-            file_size = os.path.getsize(schema_file)
-            print(f"📊 Backup file size: {file_size} bytes")
-            
-            if file_size > 0:
-                print("\n🎉 SUCCESS! Your complete database schema is backed up.")
-                print(f"📁 File: {schema_file}")
-                print("\nThis file contains:")
-                print("  ✅ All table structures")
-                print("  ✅ All constraints and indexes") 
-                print("  ✅ All functions and procedures")
-                print("  ✅ All triggers")
-                print("  ✅ All policies")
-                print("  ✅ Everything needed to recreate your database")
-                
-                # Also create a complete backup (with data) option
-                create_data_backup = input("\nDo you also want a backup WITH data? (y/n): ").strip().lower()
-                
-                if create_data_backup == 'y':
-                    data_file = f"complete_backup_{timestamp}.sql"
-                    print(f"🚀 Creating complete backup: {data_file}")
-                    
-                    cmd_data = cmd.copy()
-                    cmd_data.remove('--schema-only')  # Remove schema-only flag
-                    cmd_data[-1] = '--file=' + data_file  # Update filename
-                    
-                    result_data = subprocess.run(cmd_data, env=env, capture_output=True, text=True)
-                    
-                    if result_data.returncode == 0:
-                        data_size = os.path.getsize(data_file)
-                        print(f"✅ Complete backup finished: {data_file} ({data_size} bytes)")
-                    else:
-                        print(f"❌ Data backup failed: {result_data.stderr}")
-            else:
-                print("❌ Backup file is empty. Check your credentials.")
-                
+            file_size = os.path.getsize(output_file)
+            print(f"✅ SUCCESS! Backup saved: {output_file} ({file_size} bytes)")
         else:
-            print(f"❌ pg_dump failed: {result.stderr}")
-            if "password authentication failed" in result.stderr:
-                print("💡 Wrong password. Get the correct one from Supabase Dashboard > Settings > Database")
-            elif "could not connect" in result.stderr:
-                print("💡 Connection failed. Check if pg_dump is installed: brew install postgresql")
-                
+            print(f"❌ pg_dump failed for {mode}: {result.stderr}")
+            if "Wrong password" in result.stderr:
+                print("💡 Hint: Password is still incorrect. Please reset and update 'PASS' in .env.")
+            
     except FileNotFoundError:
-        print("❌ pg_dump not found. Install PostgreSQL tools:")
-        print("   macOS: brew install postgresql")
-        print("   Ubuntu: sudo apt-get install postgresql-client")
-        print("   Windows: Download from postgresql.org")
+        print(f"❌ Could not find pg_dump at: {pg_dump_path}")
+        print("   Ensure PostgreSQL client tools are installed (e.g., brew install postgresql).")
     except Exception as e:
-        print(f"❌ Backup failed: {e}")
+        print(f"❌ An error occurred during {mode} backup: {e}")
+
+def main():
+    config, password = get_config()
+    if not config:
+        return
+        
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # --- 1. Schema-Only Backup ---
+    schema_file = f"schema_only_{timestamp}.sql"
+    run_pg_dump(config, schema_file, 'SCHEMA_ONLY')
+    
+    # --- 2. Full Backup (Schema + Data) ---
+    full_file = f"full_backup_{timestamp}.sql"
+    run_pg_dump(config, full_file, 'FULL_BACKUP')
+
 
 if __name__ == "__main__":
-    backup_supabase_schema()
+    main()
